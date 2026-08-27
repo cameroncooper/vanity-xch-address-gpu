@@ -1,0 +1,24 @@
+[package]
+name = "vanity-chia"
+description = "Chia vanity address generator CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "vanity-chia"
+path = "src/main.rs"
+
+[features]
+default = []
+gpu = ["dep:vanity-gpu"]
+
+[dependencies]
+clap.workspace = true
+num_cpus.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+vanity-core = { path = "../vanity-core" }
+vanity-gpu = { path = "../vanity-gpu", optional = true }

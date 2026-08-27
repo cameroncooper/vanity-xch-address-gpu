@@ -1,0 +1,28 @@
+[package]
+name = "vanity-gpu"
+description = "CUDA-accelerated Chia vanity address search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bip39.workspace = true
+chia-bls.workspace = true
+chia-puzzle-types.workspace = true
+hex.workspace = true
+rand.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+vanity-core = { path = "../vanity-core" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(cuda)"] }
+
+[build-dependencies]
+blst = "0.3"
+cc = "1"
+sppark = "0.1.15"
+
+[features]
+default = []

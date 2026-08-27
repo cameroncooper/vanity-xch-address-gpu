@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chia vanity (WebGPU)</title>
+  </head>
+  <body>
+    <main class="page">
+      <header>
+        <h1>Chia vanity address</h1>
+        <p class="lede">
+          Local WebGPU search for <code>xch1</code> prefix and/or suffix. Keys are
+          GPU-native and not Chia mnemonic/index portable. Keep this page offline.
+        </p>
+      </header>
+
+      <section class="panel" aria-labelledby="search-heading">
+        <h2 id="search-heading">Search</h2>
+        <form id="search-form">
+          <label>
+            Prefix
+            <input id="prefix" name="prefix" type="text" spellcheck="false" placeholder="after xch1" />
+          </label>
+          <label>
+            Suffix
+            <input id="suffix" name="suffix" type="text" spellcheck="false" placeholder="end of address" />
+          </label>
+          <label>
+            HRP
+            <select id="hrp" name="hrp">
+              <option value="xch" selected>xch</option>
+              <option value="txch">txch</option>
+            </select>
+          </label>
+          <div class="actions">
+            <button type="submit" id="start-btn">Start</button>
+            <button type="button" id="stop-btn" disabled>Stop</button>
+            <button type="button" id="selftest-btn">Self-test</button>
+          </div>
+        </form>
+        <p id="form-error" class="error" hidden></p>
+      </section>
+
+      <section class="panel" aria-labelledby="status-heading">
+        <h2 id="status-heading">Progress</h2>
+        <p id="gpu-status">Checking WebGPU…</p>
+        <dl class="stats">
+          <div><dt>Keys tried</dt><dd id="keys-tried">0</dd></div>
+          <div><dt>Keys/sec</dt><dd id="keys-per-sec">0</dd></div>
+          <div><dt>Expected trials</dt><dd id="expected-trials">—</dd></div>
+          <div><dt>ETA</dt><dd id="eta">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel" aria-labelledby="result-heading">
+        <h2 id="result-heading">Result</h2>
+        <p id="result-empty">No match yet.</p>
+        <div id="result" hidden>
+          <p><span class="label">Address</span> <code id="result-address"></code>
+            <button type="button" id="copy-address">Copy</button></p>
+          <p><span class="label">Secret key</span> <code id="result-sk"></code>
+            <button type="button" id="copy-sk">Copy</button></p>
+          <p><span class="label">Index</span> <code id="result-index"></code></p>
+          <p><span class="label">Derivation</span> <code>gpu-native-nonportable</code></p>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

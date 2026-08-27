@@ -1,0 +1,25 @@
+{
+  "name": "vanity-chia-webgpu",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "generate-table": "node scripts/generate-table.mjs",
+    "test": "vitest run",
+    "selftest:gpu": "node scripts/gpu-selftest.mjs",
+    "smoke:gpu": "node scripts/gpu-selftest.mjs \"http://127.0.0.1:5173/?smoke=1\""
+  },
+  "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.72",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  }
+}
