@@ -13,13 +13,10 @@ fn rotr32(x: u32, n: u32) -> u32 {
   return (x >> n) | (x << (32u - n));
 }
 
-fn sha256_transform(state: ptr<function, array<u32, 8>>, block: ptr<function, array<u32, 64>>) {
+fn sha256_transform(state: ptr<function, array<u32, 8>>, block: ptr<function, array<u32, 16>>) {
   var w: array<u32, 64>;
   for (var i = 0u; i < 16u; i++) {
-    w[i] = ((*block)[i * 4u] << 24u)
-         | ((*block)[i * 4u + 1u] << 16u)
-         | ((*block)[i * 4u + 2u] << 8u)
-         | (*block)[i * 4u + 3u];
+    w[i] = (*block)[i];
   }
   for (var i = 16u; i < 64u; i++) {
     let s0 = rotr32(w[i - 15u], 7u) ^ rotr32(w[i - 15u], 18u) ^ (w[i - 15u] >> 3u);
@@ -67,39 +64,49 @@ fn sha256_init_state() -> array<u32, 8> {
   return state;
 }
 
+fn load_be_word(input: ptr<function, array<u32, 80>>, off: u32, len: u32) -> u32 {
+  var word = 0u;
+  for (var i = 0u; i < 4u; i++) {
+    let idx = off + i;
+    var byte = 0u;
+    if (idx < len) {
+      byte = (*input)[idx];
+    } else if (idx == len) {
+      byte = 0x80u;
+    }
+    word = (word << 8u) | byte;
+  }
+  return word;
+}
+
 fn sha256_bytes(input: ptr<function, array<u32, 80>>, len: u32) -> array<u32, 32> {
   var state = sha256_init_state();
-  var block: array<u32, 64>;
+  var block: array<u32, 16>;
   var offset = 0u;
   loop {
     if (len - offset < 64u) {
       break;
     }
-    for (var i = 0u; i < 64u; i++) {
-      block[i] = (*input)[offset + i];
+    for (var i = 0u; i < 16u; i++) {
+      block[i] = load_be_word(input, offset + i * 4u, len);
     }
     sha256_transform(&state, &block);
     offset += 64u;
   }
-  let rem = len - offset;
-  for (var i = 0u; i < 64u; i++) {
+  for (var i = 0u; i < 16u; i++) {
     block[i] = 0u;
   }
-  for (var i = 0u; i < rem; i++) {
-    block[i] = (*input)[offset + i];
+  let rem = len - offset;
+  for (var i = 0u; i < 16u; i++) {
+    block[i] = load_be_word(input, offset + i * 4u, len);
   }
-  block[rem] = 0x80u;
-  let bit_len_lo = len * 8u;
   if (rem >= 56u) {
     sha256_transform(&state, &block);
-    for (var i = 0u; i < 64u; i++) {
+    for (var i = 0u; i < 16u; i++) {
       block[i] = 0u;
     }
   }
-  block[63] = bit_len_lo & 0xffu;
-  block[62] = (bit_len_lo >> 8u) & 0xffu;
-  block[61] = (bit_len_lo >> 16u) & 0xffu;
-  block[60] = (bit_len_lo >> 24u) & 0xffu;
+  block[15] = len * 8u;
   sha256_transform(&state, &block);
   var out: array<u32, 32>;
   for (var i = 0u; i < 8u; i++) {

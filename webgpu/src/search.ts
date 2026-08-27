@@ -1,4 +1,12 @@
-import { DEFAULT_BATCH, createGpuContext, runFilterBatch, verifyAndSelectHit, type GpuContext } from "./gpu";
+import {
+  DEFAULT_BATCH,
+  collectFilterBatch,
+  createGpuContext,
+  enqueueFilterBatch,
+  verifyAndSelectHit,
+  type GpuContext,
+  type PendingBatch,
+} from "./gpu";
 import { expectedTrials, type VanityParams } from "./params";
 import type { VerifiedHit } from "./verify";
 
@@ -27,11 +35,16 @@ export async function searchVanity(options: SearchOptions): Promise<VerifiedHit>
   const started = performance.now();
   let keys = 0;
   let startIndex = 0;
+  let slot = 0;
+  let pending: PendingBatch | null = null;
 
   while (!options.signal?.aborted) {
-    const hits = await runFilterBatch(ctx, intermediateSk, startIndex, batchSize, params);
+    const next = enqueueFilterBatch(ctx, slot, intermediateSk, startIndex, batchSize, params);
     keys += batchSize;
     startIndex = (startIndex + batchSize) >>> 0;
+    slot ^= 1;
+    const hits = pending ? await collectFilterBatch(ctx, pending) : [];
+    pending = next;
     const elapsedSec = (performance.now() - started) / 1000;
     const keysPerSec = elapsedSec > 0 ? keys / elapsedSec : 0;
     options.onProgress?.({
@@ -41,11 +54,21 @@ export async function searchVanity(options: SearchOptions): Promise<VerifiedHit>
       expectedTrials: expected,
       etaSec: keysPerSec > 0 ? Math.max(0, expected - keys) / keysPerSec : null,
     });
+    if (hits.length > 0) {
+      const verified = verifyAndSelectHit(intermediateSk, hits, params);
+      if (verified) {
+        return verified;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  if (pending) {
+    const hits = await collectFilterBatch(ctx, pending);
     const verified = verifyAndSelectHit(intermediateSk, hits, params);
     if (verified) {
       return verified;
     }
-    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   throw new DOMException("Search aborted", "AbortError");

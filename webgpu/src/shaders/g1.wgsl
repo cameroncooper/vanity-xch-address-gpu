@@ -2,26 +2,21 @@ const FIXED_BASE_WINDOW_BITS: u32 = 6u;
 const FIXED_BASE_WINDOWS: u32 = 43u;
 const FIXED_BASE_ENTRIES: u32 = 63u;
 
-fn table_byte(byte_off: u32) -> u32 {
-  let word = g1_table[byte_off / 4u];
-  return (word >> ((byte_off % 4u) * 8u)) & 0xffu;
-}
-
-fn load_be48_from_table(byte_off: u32) -> Fp {
-  var be: array<u32, 48>;
-  for (var i = 0u; i < 48u; i++) {
-    be[i] = table_byte(byte_off + i);
-  }
-  return fp_from_be48_bytes(be);
+fn load_fp_from_table(word_off: u32) -> Fp {
+  return Fp(
+    vec4<u32>(g1_table[word_off], g1_table[word_off + 1u], g1_table[word_off + 2u], g1_table[word_off + 3u]),
+    vec4<u32>(g1_table[word_off + 4u], g1_table[word_off + 5u], g1_table[word_off + 6u], g1_table[word_off + 7u]),
+    vec4<u32>(g1_table[word_off + 8u], g1_table[word_off + 9u], g1_table[word_off + 10u], g1_table[word_off + 11u]),
+  );
 }
 
 fn affine_from_table(window: u32, digit: u32) -> Affine {
   let idx = window * FIXED_BASE_ENTRIES + (digit - 1u);
-  let byte_off = idx * 96u;
+  let word_off = idx * 24u;
   var p: Affine;
-  p.x = load_be48_from_table(byte_off);
-  p.y = load_be48_from_table(byte_off + 48u);
-  p.inf = 0u;
+  p.x = load_fp_from_table(word_off);
+  p.y = load_fp_from_table(word_off + 12u);
+  p.inf = select(0u, 1u, fp_is_zero(p.x) && fp_is_zero(p.y));
   return p;
 }
 

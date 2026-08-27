@@ -71,7 +71,7 @@ fn standard_puzzle_hash_from_synthetic_pk(synthetic_pk: array<u32, 48>) -> array
   return shatree_pair(A_KW_TREEHASH, mod_and_args);
 }
 
-fn synthetic_pk_from_wallet(wallet_pk: array<u32, 48>, wallet_sk: array<u32, 32>) -> array<u32, 48> {
+fn synthetic_sk_from_wallet(wallet_pk: array<u32, 48>, wallet_sk: array<u32, 32>) -> array<u32, 32> {
   var offset_input: array<u32, 80>;
   for (var i = 0u; i < 48u; i++) {
     offset_input[i] = wallet_pk[i];
@@ -81,7 +81,11 @@ fn synthetic_pk_from_wallet(wallet_pk: array<u32, 48>, wallet_sk: array<u32, 32>
   }
   var offset = sha256_bytes(&offset_input, 80u);
   offset = reduce_signed_scalar_mod_order(offset);
-  let synthetic_sk = add_scalars_mod_order(wallet_sk, offset);
+  return add_scalars_mod_order(wallet_sk, offset);
+}
+
+fn synthetic_pk_from_wallet(wallet_pk: array<u32, 48>, wallet_sk: array<u32, 32>) -> array<u32, 48> {
+  let synthetic_sk = synthetic_sk_from_wallet(wallet_pk, wallet_sk);
   let projective = fixed_base_mul_generator(synthetic_sk);
   let affine = projective_to_affine(projective);
   return compress_g1(affine);

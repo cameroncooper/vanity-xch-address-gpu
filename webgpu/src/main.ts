@@ -2,19 +2,21 @@ import "./style.css";
 
 import { bytesEqual, bytesToHex } from "./bytes";
 import {
+  benchmarkGpu,
   createGpuContext,
   crossCheckGpu,
   DEFAULT_BATCH,
+  formatAdapterLabel,
   runFilterBatch,
-  verifyAndSelectHit,
+  WORKGROUP_SIZE,
   type GpuContext,
 } from "./gpu";
 import {
-  addressMatches,
   expectedTrials,
   parseVanityParams,
   type VanityParams,
 } from "./params";
+import { searchVanity } from "./search";
 import { EXPECTED_GENERATOR_COMPRESSED, generatorCompressed } from "./verify";
 
 const form = document.querySelector<HTMLFormElement>("#search-form")!;
@@ -24,6 +26,7 @@ const hrpSelect = document.querySelector<HTMLSelectElement>("#hrp")!;
 const startBtn = document.querySelector<HTMLButtonElement>("#start-btn")!;
 const stopBtn = document.querySelector<HTMLButtonElement>("#stop-btn")!;
 const selftestBtn = document.querySelector<HTMLButtonElement>("#selftest-btn")!;
+const benchmarkBtn = document.querySelector<HTMLButtonElement>("#benchmark-btn")!;
 const formError = document.querySelector<HTMLParagraphElement>("#form-error")!;
 const gpuStatus = document.querySelector<HTMLParagraphElement>("#gpu-status")!;
 const keysTriedEl = document.querySelector<HTMLElement>("#keys-tried")!;
@@ -37,7 +40,7 @@ const resultSk = document.querySelector<HTMLElement>("#result-sk")!;
 const resultIndex = document.querySelector<HTMLElement>("#result-index")!;
 
 let ctxPromise: Promise<GpuContext> | null = null;
-let stopRequested = false;
+let searchAbort: AbortController | null = null;
 let searching = false;
 
 function gpuContext(): Promise<GpuContext> {
@@ -45,6 +48,18 @@ function gpuContext(): Promise<GpuContext> {
     ctxPromise = createGpuContext();
   }
   return ctxPromise;
+}
+
+function setCliResult(
+  ok: boolean,
+  extra: Record<string, string | number | boolean> = {},
+): void {
+  document.documentElement.dataset.cli = JSON.stringify({
+    ok,
+    gpu: gpuStatus.textContent ?? "",
+    error: formError.hidden ? "" : (formError.textContent ?? ""),
+    ...extra,
+  });
 }
 
 function setError(message: string | null): void {
@@ -112,16 +127,22 @@ form.addEventListener("submit", (event) => {
 });
 
 stopBtn.addEventListener("click", () => {
-  stopRequested = true;
+  searchAbort?.abort();
 });
 
 selftestBtn.addEventListener("click", () => {
   void runSelfTest();
 });
 
+benchmarkBtn.addEventListener("click", () => {
+  void runBenchmark();
+});
+
 async function runSelfTest(): Promise<void> {
   setError(null);
   gpuStatus.textContent = "Running self-test…";
+  startBtn.disabled = true;
+  benchmarkBtn.disabled = true;
   try {
     const gen = generatorCompressed();
     if (!bytesEqual(gen, EXPECTED_GENERATOR_COMPRESSED)) {
@@ -142,60 +163,106 @@ async function runSelfTest(): Promise<void> {
     const ctx = await createGpuContext({ entryPoint: "hash_kernel" });
     ctxPromise = Promise.resolve(ctx);
     await crossCheckGpu(ctx, 4);
-    gpuStatus.textContent = "Self-test passed (CPU generator + GPU vs JS puzzle hashes).";
+    gpuStatus.textContent = `Self-test passed on ${formatAdapterLabel(ctx.adapter)} (GPU vs JS puzzle hashes).`;
+    setCliResult(true, { kind: "selftest", adapter: formatAdapterLabel(ctx.adapter) });
   } catch (err) {
     gpuStatus.textContent = "Self-test failed.";
     setError(err instanceof Error ? err.message : String(err));
+    setCliResult(false, { kind: "selftest" });
+  } finally {
+    startBtn.disabled = false;
+    benchmarkBtn.disabled = false;
+  }
+}
+
+async function runBenchmark(samples = 10_000): Promise<void> {
+  setError(null);
+  gpuStatus.textContent = "Benchmarking WebGPU…";
+  searching = true;
+  startBtn.disabled = true;
+  selftestBtn.disabled = true;
+  benchmarkBtn.disabled = true;
+  try {
+    const ctx = await gpuContext();
+    const result = await benchmarkGpu(ctx, samples);
+    gpuStatus.textContent = `${formatAdapterLabel(result.adapter)}: ${formatCount(result.keysPerSec)} keys/sec (${result.samples} keys in ${result.elapsedSec.toFixed(1)}s)`;
+    keysTriedEl.textContent = formatCount(result.samples);
+    keysPerSecEl.textContent = formatCount(result.keysPerSec);
+    expectedEl.textContent = "—";
+    etaEl.textContent = "—";
+    setCliResult(true, {
+      kind: "benchmark",
+      adapter: formatAdapterLabel(result.adapter),
+      keysPerSec: result.keysPerSec,
+      samples: result.samples,
+      elapsedSec: result.elapsedSec,
+      batch: ctx.maxBatch,
+      workgroup: ctx.workgroupSize,
+    });
+  } catch (err) {
+    setError(err instanceof Error ? err.message : String(err));
+    gpuStatus.textContent = "Benchmark failed.";
+    setCliResult(false, { kind: "benchmark" });
+  } finally {
+    searching = false;
+    startBtn.disabled = false;
+    selftestBtn.disabled = false;
+    benchmarkBtn.disabled = false;
   }
 }
 
 async function runSearch(params: VanityParams): Promise<void> {
   searching = true;
-  stopRequested = false;
+  searchAbort = new AbortController();
   startBtn.disabled = true;
   stopBtn.disabled = false;
   selftestBtn.disabled = true;
+  benchmarkBtn.disabled = true;
   resultEl.hidden = true;
   resultEmpty.hidden = false;
   const expected = expectedTrials(params);
   expectedEl.textContent = formatCount(expected);
-  const intermediateSk = crypto.getRandomValues(new Uint8Array(32));
-  const started = performance.now();
   let keys = 0;
-  let startIndex = 0;
 
   try {
     const ctx = await gpuContext();
     gpuStatus.textContent = "Searching on WebGPU…";
-    while (!stopRequested) {
-      const hits = await runFilterBatch(ctx, intermediateSk, startIndex, DEFAULT_BATCH, params);
-      keys += DEFAULT_BATCH;
-      startIndex = (startIndex + DEFAULT_BATCH) >>> 0;
-      const elapsedSec = (performance.now() - started) / 1000;
-      const rate = elapsedSec > 0 ? keys / elapsedSec : 0;
-      keysTriedEl.textContent = formatCount(keys);
-      keysPerSecEl.textContent = formatCount(rate);
-      etaEl.textContent = rate > 0 ? formatDuration((expected - keys) / rate) : "—";
-
-      const verified = verifyAndSelectHit(intermediateSk, hits, params);
-      if (verified && addressMatches(verified.address, params)) {
-        showResult(verified.address, verified.secretKey, verified.index);
-        gpuStatus.textContent = "Match found.";
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    if (stopRequested && resultEl.hidden) {
-      gpuStatus.textContent = "Stopped.";
-    }
+    const verified = await searchVanity({
+      params,
+      ctx,
+      batchSize: ctx.maxBatch,
+      signal: searchAbort.signal,
+      onProgress: (progress) => {
+        keys = progress.keysChecked;
+        keysTriedEl.textContent = formatCount(progress.keysChecked);
+        keysPerSecEl.textContent = formatCount(progress.keysPerSec);
+        etaEl.textContent =
+          progress.etaSec != null ? formatDuration(progress.etaSec) : "—";
+      },
+    });
+    showResult(verified.address, verified.secretKey, verified.index);
+    gpuStatus.textContent = "Match found.";
+    setCliResult(true, {
+      kind: "search",
+      address: verified.address,
+      keys,
+    });
   } catch (err) {
-    setError(err instanceof Error ? err.message : String(err));
-    gpuStatus.textContent = "Search failed.";
+    if (err instanceof DOMException && err.name === "AbortError") {
+      gpuStatus.textContent = "Stopped.";
+      setCliResult(false, { kind: "search", stopped: true, keys });
+    } else {
+      setError(err instanceof Error ? err.message : String(err));
+      gpuStatus.textContent = "Search failed.";
+      setCliResult(false, { kind: "search" });
+    }
   } finally {
     searching = false;
+    searchAbort = null;
     startBtn.disabled = false;
     stopBtn.disabled = true;
     selftestBtn.disabled = false;
+    benchmarkBtn.disabled = false;
   }
 }
 
@@ -203,6 +270,7 @@ void (async () => {
   const query = new URLSearchParams(location.search);
   const selftest = query.has("selftest");
   const smoke = query.has("smoke");
+  const benchmark = query.has("benchmark");
   try {
     if (selftest) {
       await runSelfTest();
@@ -211,8 +279,16 @@ void (async () => {
       document.documentElement.dataset.selftest = failed ? "fail" : "pass";
       return;
     }
-    await gpuContext();
-    gpuStatus.textContent = "WebGPU ready.";
+    if (benchmark) {
+      const samples = Math.max(1, Number(query.get("samples") || 10_000) || 10_000);
+      const batch = Math.max(1, Number(query.get("batch") || DEFAULT_BATCH) || DEFAULT_BATCH);
+      const workgroup = Math.max(1, Number(query.get("workgroup") || WORKGROUP_SIZE) || WORKGROUP_SIZE);
+      ctxPromise = createGpuContext({ batchSize: batch, workgroupSize: workgroup });
+      await runBenchmark(samples);
+      return;
+    }
+    const ctx = await gpuContext();
+    gpuStatus.textContent = `WebGPU ready (${formatAdapterLabel(ctx.adapter)}).`;
     if (smoke) {
       prefixInput.value = query.get("prefix") || "q";
       suffixInput.value = query.get("suffix") || "";
@@ -224,6 +300,7 @@ void (async () => {
     }
   } catch (err) {
     gpuStatus.textContent = err instanceof Error ? err.message : String(err);
+    setCliResult(false, { kind: selftest ? "selftest" : smoke ? "search" : benchmark ? "benchmark" : "init" });
     if (selftest || smoke) {
       document.title = "SELFTEST_FAIL";
       document.documentElement.dataset.selftest = "fail";

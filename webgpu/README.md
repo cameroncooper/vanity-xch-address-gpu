@@ -55,6 +55,21 @@ Shaders are bundled through Vite `?raw` imports. Any bundler that can import `.w
 
 `npm run generate-table` rebuilds `public/g1_table.bin` after you change window size in `scripts/generate-table.mjs`.
 
+## Compare to CUDA on the same GPU
+
+Run the CLI benchmark and this page on the same machine. Chrome should pick the discrete NVIDIA GPU (`powerPreference: "high-performance"`). Confirm the adapter name in the status line, then click **Benchmark**.
+
+```bash
+# CUDA (same machine)
+cargo run --release -p vanity-chia --features gpu -- --benchmark --gpu
+
+# WebGPU
+cd webgpu && npm run dev
+# open the URL, click Benchmark (or ?benchmark=1)
+```
+
+This compares implementations, not just hardware. The WGSL path is the same algorithm but much slower than the CUDA kernel.
+
 ## Security
 
 - Keys exist in page JS/GPU memory. Anyone who ships this page can change the JS and steal them.

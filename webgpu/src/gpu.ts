@@ -10,9 +10,11 @@ import { charsetValues, encodeBech32m } from "./bech32";
 import { addressMatches, type Hrp, type VanityParams } from "./params";
 import { verifyGpuHit, type VerifiedHit } from "./verify";
 
-export const WORKGROUP_SIZE = 64;
-export const DEFAULT_BATCH = 32;
-export const HASH_STRIDE = 32;
+export const WORKGROUP_SIZE = 256;
+export const WORKGROUP_SIZES = [64, 128, 256] as const;
+export const DEFAULT_BATCH = 262144;
+export const HASH_STRIDE = 36;
+export const HASH_INDEX_BYTES = 4;
 export const DEFAULT_TABLE_URL = "g1_table.bin";
 const PARAMS_BYTES = 544;
 
@@ -23,6 +25,7 @@ export interface GpuInitOptions {
   tableBytes?: Uint8Array;
   entryPoint?: string;
   batchSize?: number;
+  workgroupSize?: number;
 }
 
 export interface GpuHit {
@@ -30,8 +33,25 @@ export interface GpuHit {
   puzzleHash: Uint8Array;
 }
 
+export interface GpuAdapterLabel {
+  vendor: string;
+  architecture: string;
+  device: string;
+  description: string;
+}
+
+interface GpuFrame {
+  paramsBuffer: GPUBuffer;
+  hitCountBuffer: GPUBuffer;
+  hitCountReadBuffer: GPUBuffer;
+  hashesBuffer: GPUBuffer;
+  hashesReadBuffer: GPUBuffer;
+  bindGroup: GPUBindGroup;
+}
+
 export interface GpuContext {
   device: GPUDevice;
+  adapter: GpuAdapterLabel;
   pipeline: GPUComputePipeline;
   tableBuffer: GPUBuffer;
   paramsBuffer: GPUBuffer;
@@ -39,8 +59,17 @@ export interface GpuContext {
   hitCountBuffer: GPUBuffer;
   hashesBuffer: GPUBuffer;
   hashesReadBuffer: GPUBuffer;
+  frames: GpuFrame[];
   maxBatch: number;
+  workgroupSize: number;
   bindGroup: GPUBindGroup;
+}
+
+export interface GpuBenchmarkResult {
+  adapter: GpuAdapterLabel;
+  samples: number;
+  elapsedSec: number;
+  keysPerSec: number;
 }
 
 export function shaderSource(): string {
@@ -55,16 +84,26 @@ export function shaderSource(): string {
   ].join("\n");
 }
 
+function resolveWorkgroupSize(requested?: number): number {
+  const size = requested ?? WORKGROUP_SIZE;
+  if (!WORKGROUP_SIZES.includes(size as (typeof WORKGROUP_SIZES)[number])) {
+    throw new Error(`workgroup size must be one of ${WORKGROUP_SIZES.join(", ")}`);
+  }
+  return size;
+}
+
 export async function createGpuContext(options: GpuInitOptions = {}): Promise<GpuContext> {
   const entryPoint = options.entryPoint ?? "hash_kernel";
   const batchSize = options.batchSize ?? DEFAULT_BATCH;
+  const workgroupSize = resolveWorkgroupSize(options.workgroupSize);
   if (!("gpu" in navigator) || !navigator.gpu) {
     throw new Error("WebGPU is not available in this browser");
   }
-  const adapter = await navigator.gpu.requestAdapter();
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) {
     throw new Error("No WebGPU adapter found");
   }
+  const adapterLabel = readAdapterLabel(adapter);
   const device = await adapter.requestDevice();
   device.addEventListener("uncapturederror", (event) => {
     console.error("WebGPU error", event.error, event.error.message);
@@ -82,25 +121,9 @@ export async function createGpuContext(options: GpuInitOptions = {}): Promise<Gp
   });
   device.queue.writeBuffer(tableBuffer, 0, tableBytes);
 
-  const paramsBuffer = device.createBuffer({
-    size: PARAMS_BYTES,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
   const skBuffer = device.createBuffer({
     size: 32,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const hitCountBuffer = device.createBuffer({
-    size: 16,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-  });
-  const hashesBuffer = device.createBuffer({
-    size: batchSize * HASH_STRIDE,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-  });
-  const hashesReadBuffer = device.createBuffer({
-    size: batchSize * HASH_STRIDE,
-    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
   });
 
   const module = device.createShaderModule({ code: shaderSource() });
@@ -125,32 +148,136 @@ export async function createGpuContext(options: GpuInitOptions = {}): Promise<Gp
   const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
   const pipeline = device.createComputePipeline({
     layout: pipelineLayout,
-    compute: { module, entryPoint },
+    compute: {
+      module,
+      entryPoint,
+      constants: { workgroup_size_x: workgroupSize },
+    },
   });
 
-  const bindGroup = device.createBindGroup({
-    layout: bindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: paramsBuffer } },
-      { binding: 1, resource: { buffer: skBuffer } },
-      { binding: 2, resource: { buffer: tableBuffer } },
-      { binding: 3, resource: { buffer: hitCountBuffer } },
-      { binding: 4, resource: { buffer: hashesBuffer } },
-    ],
+  const frames: GpuFrame[] = [0, 1].map(() => {
+    const paramsBuffer = device.createBuffer({
+      size: PARAMS_BYTES,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const hitCountBuffer = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
+    const hitCountReadBuffer = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const hashesBuffer = device.createBuffer({
+      size: batchSize * HASH_STRIDE,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const hashesReadBuffer = device.createBuffer({
+      size: batchSize * HASH_STRIDE,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: paramsBuffer } },
+        { binding: 1, resource: { buffer: skBuffer } },
+        { binding: 2, resource: { buffer: tableBuffer } },
+        { binding: 3, resource: { buffer: hitCountBuffer } },
+        { binding: 4, resource: { buffer: hashesBuffer } },
+      ],
+    });
+    return {
+      paramsBuffer,
+      hitCountBuffer,
+      hitCountReadBuffer,
+      hashesBuffer,
+      hashesReadBuffer,
+      bindGroup,
+    };
   });
+  const primary = frames[0]!;
 
   return {
     device,
+    adapter: adapterLabel,
     pipeline,
     tableBuffer,
-    paramsBuffer,
+    paramsBuffer: primary.paramsBuffer,
     skBuffer,
-    hitCountBuffer,
-    hashesBuffer,
-    hashesReadBuffer,
+    hitCountBuffer: primary.hitCountBuffer,
+    hashesBuffer: primary.hashesBuffer,
+    hashesReadBuffer: primary.hashesReadBuffer,
+    frames,
     maxBatch: batchSize,
-    bindGroup,
+    workgroupSize,
+    bindGroup: primary.bindGroup,
   };
+}
+
+export interface PendingBatch {
+  slot: number;
+  startIndex: number;
+  count: number;
+  compact: boolean;
+}
+
+export function enqueueFilterBatch(
+  ctx: GpuContext,
+  slot: number,
+  intermediateSk: Uint8Array,
+  startIndex: number,
+  count: number,
+  params: VanityParams,
+  matchAll = false,
+  debugStage = 0,
+): PendingBatch {
+  if (count > ctx.maxBatch) {
+    throw new Error(`batch count ${count} exceeds max ${ctx.maxBatch}`);
+  }
+  const frame = ctx.frames[slot];
+  if (!frame) {
+    throw new Error(`invalid GPU frame ${slot}`);
+  }
+  const compact = isPrefixCompact(params, matchAll);
+  writeParams(ctx.device, frame.paramsBuffer, startIndex, count, params, matchAll, debugStage);
+  ctx.device.queue.writeBuffer(ctx.skBuffer, 0, intermediateSk);
+  ctx.device.queue.writeBuffer(frame.hitCountBuffer, 0, new Uint32Array([0, 0, 0, 0]));
+
+  const workgroups = Math.ceil(count / ctx.workgroupSize);
+  const encoder = ctx.device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(ctx.pipeline);
+  pass.setBindGroup(0, frame.bindGroup);
+  pass.dispatchWorkgroups(workgroups);
+  pass.end();
+  encoder.copyBufferToBuffer(frame.hitCountBuffer, 0, frame.hitCountReadBuffer, 0, 16);
+  encoder.copyBufferToBuffer(frame.hashesBuffer, 0, frame.hashesReadBuffer, 0, count * HASH_STRIDE);
+  ctx.device.queue.submit([encoder.finish()]);
+  return { slot, startIndex, count, compact };
+}
+
+export async function collectFilterBatch(ctx: GpuContext, pending: PendingBatch): Promise<GpuHit[]> {
+  const frame = ctx.frames[pending.slot];
+  if (!frame) {
+    throw new Error(`invalid GPU frame ${pending.slot}`);
+  }
+  const timeoutMs = Math.max(60000, pending.count * 4);
+  const mapped = frame.hashesReadBuffer.mapAsync(GPUMapMode.READ);
+  const timeout = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error("GPU dispatch timed out")), timeoutMs);
+  });
+  await Promise.race([mapped, timeout]);
+  let hitCount = pending.count;
+  if (pending.compact) {
+    await frame.hitCountReadBuffer.mapAsync(GPUMapMode.READ);
+    hitCount = new Uint32Array(frame.hitCountReadBuffer.getMappedRange().slice(0, 4))[0] ?? 0;
+    frame.hitCountReadBuffer.unmap();
+  }
+  const hashBytes = new Uint8Array(
+    frame.hashesReadBuffer.getMappedRange().slice(0, hitCount * HASH_STRIDE),
+  );
+  frame.hashesReadBuffer.unmap();
+  return parseHashes(hashBytes, pending.startIndex, hitCount);
 }
 
 export async function runFilterBatch(
@@ -162,33 +289,65 @@ export async function runFilterBatch(
   matchAll = false,
   debugStage = 0,
 ): Promise<GpuHit[]> {
-  if (count > ctx.maxBatch) {
-    throw new Error(`batch count ${count} exceeds max ${ctx.maxBatch}`);
+  const pending = enqueueFilterBatch(
+    ctx,
+    0,
+    intermediateSk,
+    startIndex,
+    count,
+    params,
+    matchAll,
+    debugStage,
+  );
+  return collectFilterBatch(ctx, pending);
+}
+
+export async function benchmarkGpu(
+  ctx: GpuContext,
+  samples = 64,
+): Promise<GpuBenchmarkResult> {
+  const params: VanityParams = { prefix: "a", suffix: null, hrp: "xch" };
+  const intermediateSk = crypto.getRandomValues(new Uint8Array(32));
+  const batch = Math.min(ctx.maxBatch, samples);
+  await runFilterBatch(ctx, intermediateSk, 0, batch, params);
+  let processed = 0;
+  const started = performance.now();
+  let slot = 0;
+  let pending: PendingBatch | null = null;
+  while (processed < samples) {
+    const count = Math.min(batch, samples - processed);
+    const next = enqueueFilterBatch(ctx, slot, intermediateSk, processed, count, params);
+    processed += count;
+    slot ^= 1;
+    if (pending) {
+      await collectFilterBatch(ctx, pending);
+    }
+    pending = next;
   }
-  writeParams(ctx, startIndex, count, params, matchAll, debugStage);
-  ctx.device.queue.writeBuffer(ctx.skBuffer, 0, intermediateSk);
-  ctx.device.queue.writeBuffer(ctx.hitCountBuffer, 0, new Uint32Array([0, 0, 0, 0]));
+  if (pending) {
+    await collectFilterBatch(ctx, pending);
+  }
+  const elapsedSec = (performance.now() - started) / 1000;
+  return {
+    adapter: ctx.adapter,
+    samples,
+    elapsedSec,
+    keysPerSec: elapsedSec > 0 ? samples / elapsedSec : 0,
+  };
+}
 
-  const workgroups = Math.ceil(count / WORKGROUP_SIZE);
-  const encoder = ctx.device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(ctx.pipeline);
-  pass.setBindGroup(0, ctx.bindGroup);
-  pass.dispatchWorkgroups(workgroups);
-  pass.end();
-  encoder.copyBufferToBuffer(ctx.hashesBuffer, 0, ctx.hashesReadBuffer, 0, count * HASH_STRIDE);
-  ctx.device.queue.submit([encoder.finish()]);
+export function formatAdapterLabel(adapter: GpuAdapterLabel): string {
+  return adapter.description || adapter.device || adapter.vendor || "WebGPU adapter";
+}
 
-  const done = ctx.device.queue.onSubmittedWorkDone();
-  const timeout = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error("GPU dispatch timed out")), 60000);
-  });
-  await Promise.race([done, timeout]);
-
-  await ctx.hashesReadBuffer.mapAsync(GPUMapMode.READ);
-  const hashBytes = new Uint8Array(ctx.hashesReadBuffer.getMappedRange().slice(0, count * HASH_STRIDE));
-  ctx.hashesReadBuffer.unmap();
-  return parseHashes(hashBytes, startIndex, count);
+function readAdapterLabel(adapter: GPUAdapter): GpuAdapterLabel {
+  const info = adapter.info;
+  return {
+    vendor: info.vendor,
+    architecture: info.architecture,
+    device: info.device,
+    description: info.description,
+  };
 }
 
 export async function crossCheckGpu(ctx: GpuContext, sampleCount = 1): Promise<void> {
@@ -222,7 +381,8 @@ export function verifyAndSelectHit(
 }
 
 function writeParams(
-  ctx: GpuContext,
+  device: GPUDevice,
+  paramsBuffer: GPUBuffer,
   startIndex: number,
   count: number,
   params: VanityParams,
@@ -247,7 +407,7 @@ function writeParams(
   for (let i = 0; i < suffix.length; i++) {
     u32[72 + i] = suffix[i]!;
   }
-  ctx.device.queue.writeBuffer(ctx.paramsBuffer, 0, buf);
+  device.queue.writeBuffer(paramsBuffer, 0, buf);
 }
 
 function hrpKind(hrp: Hrp): number {
@@ -267,13 +427,18 @@ function resolveTableUrl(tableUrl = DEFAULT_TABLE_URL): string {
   return new URL(tableUrl, document.baseURI).toString();
 }
 
-function parseHashes(bytes: Uint8Array, startIndex: number, count: number): GpuHit[] {
+function isPrefixCompact(params: VanityParams, matchAll: boolean): boolean {
+  return !matchAll && params.prefix != null && params.suffix == null;
+}
+
+function parseHashes(bytes: Uint8Array, _startIndex: number, count: number): GpuHit[] {
   const hits: GpuHit[] = [];
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   for (let i = 0; i < count; i++) {
     const offset = i * HASH_STRIDE;
     hits.push({
-      index: (startIndex + i) >>> 0,
-      puzzleHash: bytes.slice(offset, offset + HASH_STRIDE),
+      index: view.getUint32(offset, true) >>> 0,
+      puzzleHash: bytes.slice(offset + HASH_INDEX_BYTES, offset + HASH_STRIDE),
     });
   }
   return hits;

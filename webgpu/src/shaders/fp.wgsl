@@ -114,17 +114,6 @@ fn ge_p(a: array<u32, 12>) -> bool {
   return true;
 }
 
-fn sub_p(a: array<u32, 12>) -> array<u32, 12> {
-  var r: array<u32, 12>;
-  var borrow = 0u;
-  for (var i = 0u; i < 12u; i++) {
-    let sb = sub_borrow(a[i], P_LIMBS[i], borrow);
-    r[i] = sb.x;
-    borrow = sb.y;
-  }
-  return r;
-}
-
 fn fp_reduce(t: array<u32, 12>, extra: u32) -> array<u32, 12> {
   var v = t;
   var e = extra;
@@ -263,10 +252,22 @@ fn fp_to_be48_bytes(p: Fp) -> array<u32, 48> {
 }
 
 fn fp_pow(base: Fp, exp: array<u32, 12>) -> Fp {
-  var acc = fp_one();
-  var bit = 0u;
+  var start = 384u;
+  for (var bit = 0u; bit < 384u; bit++) {
+    let limb = 11u - bit / 32u;
+    let b = 31u - (bit % 32u);
+    if (((exp[limb] >> b) & 1u) != 0u) {
+      start = bit;
+      break;
+    }
+  }
+  if (start >= 384u) {
+    return fp_one();
+  }
+  var acc = base;
+  var bit = start + 1u;
   loop {
-    if (bit >= params.pad0) {
+    if (bit >= 384u) {
       break;
     }
     acc = fp_sqr(acc);
